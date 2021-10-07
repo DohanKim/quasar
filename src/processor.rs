@@ -26,6 +26,7 @@ use crate::{
     instruction::QuasarInstruction,
     oracle::{determine_oracle_type, OracleType, Price, StubOracle},
     state::{BaseToken, DataType, LeverageToken, MetaData, QuasarGroup, LEVERGAE_TOKEN_DECIMALS},
+    utils::{gen_signer_key, gen_signer_seeds},
 };
 
 declare_check_assert_macros!(SourceFileId::Processor);
@@ -41,9 +42,9 @@ impl Processor {
             .ok_or(ProgramError::InvalidInstructionData)?;
 
         match instruction {
-            QuasarInstruction::InitQuasarGroup => {
+            QuasarInstruction::InitQuasarGroup { signer_nonce } => {
                 msg!("Instruction: InitQuasarGroup");
-                Self::init_quasar_group(program_id, accounts)
+                Self::init_quasar_group(program_id, accounts, signer_nonce)
             }
             QuasarInstruction::AddBaseToken => {
                 msg!("Instruction: AddBaseToken");
@@ -73,7 +74,11 @@ impl Processor {
     }
 
     #[inline(never)]
-    fn init_quasar_group(program_id: &Pubkey, accounts: &[AccountInfo]) -> QuasarResult {
+    fn init_quasar_group(
+        program_id: &Pubkey,
+        accounts: &[AccountInfo],
+        signer_nonce: u64,
+    ) -> QuasarResult {
         const NUM_FIXED: usize = 4;
         let accounts = array_ref![accounts, 0, NUM_FIXED];
 
@@ -99,6 +104,11 @@ impl Processor {
             QuasarErrorCode::Default
         )?;
 
+        check!(
+            gen_signer_key(signer_nonce, quasar_group_ai.key, program_id)? == *signer_ai.key,
+            QuasarErrorCode::InvalidSignerKey
+        )?;
+        quasar_group.signer_nonce = signer_nonce;
         quasar_group.signer_key = *signer_ai.key;
         quasar_group.mango_program_id = *mango_program_ai.key;
 

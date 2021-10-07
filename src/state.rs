@@ -62,6 +62,7 @@ pub struct QuasarGroup {
     pub num_leverage_tokens: usize,
     pub leverage_tokens: [LeverageToken; MAX_LEVERAGE_TOKENS],
 
+    pub signer_nonce: u64,
     pub signer_key: Pubkey,
     pub admin_key: Pubkey,
     pub mango_program_id: Pubkey,

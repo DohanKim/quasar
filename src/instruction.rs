@@ -12,7 +12,9 @@ pub enum QuasarInstruction {
     /// 1. `[signer]` signer_ai
     /// 2. `[]` admin_ai
     /// 3. `[]` mango_program_ai    
-    InitQuasarGroup,
+    InitQuasarGroup {
+        signer_nonce: u64,
+    },
 
     /// Add a base token which leveraged tokens are going to use as the underlying
     ///
@@ -81,7 +83,13 @@ impl QuasarInstruction {
         let discrim = u32::from_le_bytes(discrim);
 
         Some(match discrim {
-            0 => Self::InitQuasarGroup,
+            0 => {
+                let signer_nonce = array_ref![data, 0, 8];
+
+                Self::InitQuasarGroup {
+                    signer_nonce: u64::from_le_bytes(*signer_nonce),
+                }
+            }
             1 => Self::AddBaseToken,
             2 => {
                 let target_leverage = array_ref![data, 0, 16];

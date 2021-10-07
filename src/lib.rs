@@ -7,3 +7,4 @@ pub mod instruction;
 pub mod oracle;
 pub mod processor;
 pub mod state;
+pub mod utils;
