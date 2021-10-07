@@ -14,7 +14,7 @@ pub enum QuasarInstruction {
     /// 3. `[]` mango_program_ai    
     InitQuasarGroup,
 
-    /// Add a base token which leveraged tokens are going to using
+    /// Add a base token which leveraged tokens are going to use as the underlying
     ///
     /// Accounts expected by this instruction (8):
     ///
@@ -69,7 +69,10 @@ pub enum QuasarInstruction {
     },
 
     // only for test purpose
-    Test,
+    TestCreateAccount,
+
+    // only for test purpose
+    TestInitializeMint,
 }
 
 impl QuasarInstruction {
@@ -98,7 +101,8 @@ impl QuasarInstruction {
                     quantity: u64::from_le_bytes(*quantity),
                 }
             }
-            5 => QuasarInstruction::Test,
+            5 => QuasarInstruction::TestCreateAccount,
+            6 => QuasarInstruction::TestInitializeMint,
             _ => return None,
         })
     }

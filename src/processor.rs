@@ -9,7 +9,7 @@ use solana_program::{
     program_error::ProgramError,
     program_pack::{IsInitialized, Pack},
     pubkey::Pubkey,
-    system_instruction,
+    system_instruction, system_program,
     sysvar::{rent::Rent, Sysvar},
 };
 use spl_token::state::{Account as TokenAccount, Mint};
@@ -24,8 +24,8 @@ use std::cell::RefMut;
 use crate::{
     error::{check_assert, QuasarError, QuasarErrorCode, QuasarResult, SourceFileId},
     instruction::QuasarInstruction,
-    oracle::{determine_oracle_type, OracleType, StubOracle},
-    state::{BaseToken, DataType, LeverageToken, MetaData, QuasarGroup},
+    oracle::{determine_oracle_type, OracleType, Price, StubOracle},
+    state::{BaseToken, DataType, LeverageToken, MetaData, QuasarGroup, LEVERGAE_TOKEN_DECIMALS},
 };
 
 declare_check_assert_macros!(SourceFileId::Processor);
@@ -61,9 +61,13 @@ impl Processor {
                 msg!("Instruction: RedeemLeverageToken");
                 Self::redeem_leverage_token(program_id, accounts, quantity)
             }
-            QuasarInstruction::Test => {
-                msg!("Instruction: Test");
-                Self::test(program_id, accounts)
+            QuasarInstruction::TestCreateAccount => {
+                msg!("Instruction: TestCreateAccount");
+                Self::test_create_account(program_id, accounts)
+            }
+            QuasarInstruction::TestInitializeMint => {
+                msg!("Instruction: TestInitializeMint");
+                Self::test_initialize_mint(program_id, accounts)
             }
         }
     }
@@ -131,9 +135,6 @@ impl Processor {
             OracleType::Pyth => {
                 msg!("OracleType:Pyth"); // Do nothing really cause all that's needed is storing the pkey
             }
-            OracleType::Switchboard => {
-                msg!("OracleType::Switchboard");
-            }
             OracleType::Stub | OracleType::Unknown => {
                 msg!("OracleType: got unknown or stub");
                 let rent = Rent::get()?;
@@ -161,39 +162,6 @@ impl Processor {
         Ok(())
     }
 
-    // fn init_mango_account<'a>(program_id: &Pubkey, accounts: &[AccountInfo<'a>]) -> QuasarResult {
-    //     const NUM_FIXED: usize = 4;
-    //     let accounts = array_ref![accounts, 0, NUM_FIXED];
-
-    //     let [
-    //         mango_prog_ai,
-    //         mango_group_ai,         // read
-    //         mango_account_ai,       // write
-    //         signer_ai,               // read & signer
-    //     ] = accounts;
-
-    //     let instruction = Instruction {
-    //         program_id: *mango_prog_ai.key,
-    //         data: mango::instruction::MangoInstruction::InitMangoAccount.pack(),
-    //         accounts: vec![
-    //             AccountMeta::new_readonly(*mango_group_ai.key, false),
-    //             AccountMeta::new(*mango_account_ai.key, false),
-    //             AccountMeta::new_readonly(*signer_ai.key, true),
-    //         ],
-    //     };
-
-    //     let account_infos = [
-    //         mango_prog_ai.clone(),
-    //         mango_group_ai.clone(),
-    //         mango_account_ai.clone(),
-    //         signer_ai.clone(),
-    //     ];
-
-    //     invoke(&instruction, &account_infos);
-
-    //     Ok(())
-    // }
-
     #[inline(never)]
     /// Add a leveraged token to quasar group
     /// Only allow admin
@@ -202,14 +170,19 @@ impl Processor {
         accounts: &[AccountInfo],
         target_leverage: I80F48,
     ) -> QuasarResult {
-        const NUM_FIXED: usize = 6;
+        const NUM_FIXED: usize = 11;
         let accounts = array_ref![accounts, 0, NUM_FIXED];
         let [
             quasar_group_ai, // write
             mint_ai,        // read
             base_token_mint_ai,        // read
+            mango_program_ai,
+            mango_group_ai,
             mango_account_ai, // read
             mango_perp_market_ai,
+            system_program_ai,
+            token_program_ai,
+            rent_program_ai,
             admin_ai        // read, signer
         ] = accounts;
 
@@ -245,6 +218,25 @@ impl Processor {
             QuasarErrorCode::Default
         )?;
 
+        init_mango_account(
+            mango_program_ai,
+            mango_group_ai,
+            mango_account_ai,
+            admin_ai,
+            &[],
+        )?;
+
+        create_mint_account(
+            program_id,
+            admin_ai,
+            mint_ai,
+            token_program_ai,
+            system_program_ai,
+            rent_program_ai,
+            "leverage_token",
+            LEVERGAE_TOKEN_DECIMALS,
+        )?;
+
         quasar_group.leverage_tokens[token_index] = LeverageToken {
             mint: *mint_ai.key,
             base_token_mint: *base_token_mint_ai.key,
@@ -276,7 +268,7 @@ impl Processor {
     }
 
     #[inline(never)]
-    fn test<'a>(program_id: &Pubkey, accounts: &[AccountInfo<'a>]) -> QuasarResult {
+    fn test_create_account<'a>(program_id: &Pubkey, accounts: &[AccountInfo<'a>]) -> QuasarResult {
         const NUM_FIXED: usize = 4;
         let accounts = array_ref![accounts, 0, NUM_FIXED];
 
@@ -286,11 +278,6 @@ impl Processor {
             new_account_ai,
             system_program_ai,
         ] = accounts;
-        msg!(&signer_ai.key.to_string());
-        msg!(&owner_ai.key.to_string());
-
-        // let account = Pubkey::new_unique();
-        // msg!(&account.to_string());
 
         create_account(
             &signer_ai,
@@ -298,31 +285,39 @@ impl Processor {
             10,
             &owner_ai,
             &system_program_ai,
-        );
+        )?;
+
+        Ok(())
+    }
+
+    #[inline(never)]
+    fn test_initialize_mint<'a>(program_id: &Pubkey, accounts: &[AccountInfo<'a>]) -> QuasarResult {
+        const NUM_FIXED: usize = 6;
+        let accounts = array_ref![accounts, 0, NUM_FIXED];
+
+        let [
+            program_ai,
+            signer_ai,
+            mint_ai,        // write
+            token_program_ai,
+            system_program_ai,
+            rent_program_ai,
+        ] = accounts;
+
+        create_mint_account(
+            program_id,
+            signer_ai,
+            mint_ai,
+            token_program_ai,
+            system_program_ai,
+            rent_program_ai,
+            "leverage_token",
+            LEVERGAE_TOKEN_DECIMALS,
+        )?;
 
         Ok(())
     }
 }
-
-// #[allow(dead_code)]
-// pub async fn create_account(&mut self, size: usize, owner: &Pubkey) -> Pubkey {
-//     let keypair = Keypair::new();
-//     let rent = self.rent.minimum_balance(size);
-
-//     let instructions = [system_instruction::create_account(
-//         &self.context.payer.pubkey(),
-//         &keypair.pubkey(),
-//         rent as u64,
-//         size as u64,
-//         owner,
-//     )];
-
-//     self.process_transaction(&instructions, Some(&[&keypair]))
-//         .await
-//         .unwrap();
-
-//     return keypair.pubkey();
-// }
 
 fn create_account<'a>(
     signer_ai: &AccountInfo<'a>,
@@ -332,6 +327,12 @@ fn create_account<'a>(
     system_program_ai: &AccountInfo<'a>,
 ) -> ProgramResult {
     let rent = Rent::default().minimum_balance(space);
+
+    check_eq!(
+        *system_program_ai.key,
+        solana_program::system_program::id(),
+        QuasarErrorCode::InvalidAccount
+    )?;
 
     let instruction = solana_program::system_instruction::create_account(
         signer_ai.key,
@@ -375,4 +376,98 @@ fn init_mango_account<'a>(
     ];
 
     invoke_signed(&instruction, &account_infos, signers_seeds)
+}
+
+fn create_mint_account<'a>(
+    program_id: &Pubkey,
+    signer_ai: &AccountInfo<'a>,
+    mint_ai: &AccountInfo<'a>, // write
+    token_program_ai: &AccountInfo<'a>,
+    system_program_ai: &AccountInfo<'a>,
+    rent_program_ai: &AccountInfo<'a>,
+    seed: &str,
+    decimals: u8,
+) -> QuasarResult {
+    check_eq!(
+        *token_program_ai.key,
+        spl_token::id(),
+        QuasarErrorCode::InvalidAccount
+    )?;
+
+    check_eq!(
+        *system_program_ai.key,
+        solana_program::system_program::id(),
+        QuasarErrorCode::InvalidAccount
+    )?;
+
+    check_eq!(
+        *rent_program_ai.key,
+        solana_program::sysvar::rent::id(),
+        QuasarErrorCode::InvalidAccount
+    )?;
+
+    let (pda, bump_seed) = Pubkey::find_program_address(&[seed.as_bytes()], program_id);
+
+    create_account(
+        &signer_ai,
+        mint_ai,
+        Mint::LEN,
+        &token_program_ai,
+        &system_program_ai,
+    )?;
+
+    msg!("mint account {} created", mint_ai.key.to_string());
+
+    let instruction = spl_token::instruction::initialize_mint(
+        token_program_ai.key,
+        mint_ai.key,
+        &pda,
+        Some(&pda),
+        decimals,
+    )?;
+
+    solana_program::program::invoke_signed(
+        &instruction,
+        &[
+            mint_ai.clone(),
+            token_program_ai.clone(),
+            rent_program_ai.clone(),
+        ],
+        &[&[seed.as_bytes(), &[bump_seed]]],
+    )?;
+
+    Ok(())
+}
+
+#[inline(never)]
+fn read_oracle(base_token: &BaseToken, oracle_ai: &AccountInfo) -> QuasarResult<I80F48> {
+    let quote_decimals: u8 = base_token.decimals;
+    let oracle_type = determine_oracle_type(oracle_ai);
+    let price = match oracle_type {
+        OracleType::Pyth => {
+            let price_account = Price::get_price(oracle_ai).unwrap();
+            let value = I80F48::from_num(price_account.agg.price);
+
+            let decimals = (quote_decimals as i32)
+                .checked_add(price_account.expo)
+                .unwrap()
+                .checked_sub(quote_decimals as i32)
+                .unwrap();
+
+            let decimal_adj = I80F48::from_num(10u64.pow(decimals.abs() as u32));
+            if decimals < 0 {
+                value.checked_div(decimal_adj).unwrap()
+            } else {
+                value.checked_mul(decimal_adj).unwrap()
+            }
+        }
+        OracleType::Stub => {
+            let oracle = StubOracle::load(oracle_ai)?;
+            I80F48::from_num(oracle.price)
+        }
+        OracleType::Unknown => {
+            panic!("Unknown oracle");
+        }
+    };
+    Ok(price)
 }

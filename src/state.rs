@@ -20,11 +20,14 @@ declare_check_assert_macros!(SourceFileId::State);
 
 pub const MAX_BASE_TOKENS: usize = 16;
 pub const MAX_LEVERAGE_TOKENS: usize = 32;
+pub const LEVERGAE_TOKEN_DECIMALS: u8 = 0;
 
 #[repr(u8)]
 #[derive(IntoPrimitive, TryFromPrimitive)]
 pub enum DataType {
     QuasarGroup = 0,
+    BaseToken = 1,
+    LeverageToken = 2,
 }
 
 #[derive(Copy, Clone, Pod, Default)]
