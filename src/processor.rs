@@ -82,12 +82,7 @@ impl Processor {
         const NUM_FIXED: usize = 4;
         let accounts = array_ref![accounts, 0, NUM_FIXED];
 
-        let [
-            quasar_group_ai,     // write
-            signer_ai,          // read
-            admin_ai,           // read
-            mango_program_ai         // read
-        ] = accounts;
+        let [quasar_group_ai, signer_ai, admin_ai, mango_program_ai] = accounts;
         check_eq!(
             quasar_group_ai.owner,
             program_id,
@@ -125,12 +120,7 @@ impl Processor {
         const NUM_FIXED: usize = 4;
         let accounts = array_ref![accounts, 0, NUM_FIXED];
 
-        let [
-            quasar_group_ai,     // write
-            mint_ai,         //read
-            oracle_ai,          // read
-            admin_ai,           // read
-        ] = accounts;
+        let [quasar_group_ai, mint_ai, oracle_ai, admin_ai] = accounts;
 
         let mut quasar_group = QuasarGroup::load_mut_checked(quasar_group_ai, program_id)?;
         check!(admin_ai.is_signer, QuasarErrorCode::InvalidSignerKey)?;
@@ -138,6 +128,12 @@ impl Processor {
             admin_ai.key,
             &quasar_group.admin_key,
             QuasarErrorCode::InvalidSignerKey
+        )?;
+
+        // Make sure there is no duplicated base token which has the same mint key
+        check!(
+            quasar_group.find_base_token_index(mint_ai.key).is_none(),
+            QuasarErrorCode::Default
         )?;
 
         let oracle_type = determine_oracle_type(oracle_ai);
@@ -154,7 +150,7 @@ impl Processor {
         }
 
         let base_token_index = quasar_group.num_base_tokens;
-        // Make sure base token at this index not already initialized
+        // Make sure base token at this index is not already initialized
         check!(
             quasar_group.base_tokens[base_token_index].is_empty(),
             QuasarErrorCode::Default
@@ -180,21 +176,10 @@ impl Processor {
         accounts: &[AccountInfo],
         target_leverage: I80F48,
     ) -> QuasarResult {
-        const NUM_FIXED: usize = 11;
+        const NUM_FIXED: usize = 12;
         let accounts = array_ref![accounts, 0, NUM_FIXED];
-        let [
-            quasar_group_ai, // write
-            mint_ai,        // read
-            base_token_mint_ai,        // read
-            mango_program_ai,
-            mango_group_ai,
-            mango_account_ai, // read
-            mango_perp_market_ai,
-            system_program_ai,
-            token_program_ai,
-            rent_program_ai,
-            admin_ai        // read, signer
-        ] = accounts;
+        let [quasar_group_ai, mint_ai, base_token_mint_ai, mango_program_ai, mango_group_ai, mango_account_ai, mango_perp_market_ai, system_program_ai, token_program_ai, rent_program_ai, admin_ai, pda_ai] =
+            accounts;
 
         let mut quasar_group = QuasarGroup::load_mut_checked(quasar_group_ai, program_id)?;
         check!(admin_ai.is_signer, QuasarErrorCode::SignerNecessary)?;
@@ -212,7 +197,7 @@ impl Processor {
             QuasarErrorCode::InvalidAccount
         )?;
 
-        // Make sure there is no duplicated leverage token which has same base token and leverage target
+        // Make sure there is no duplicated leverage token which has the same base token and the leverage target
         check!(
             quasar_group
                 .find_leverage_token_index(base_token_mint_ai.key, target_leverage)
@@ -222,28 +207,37 @@ impl Processor {
 
         let token_index = quasar_group.num_leverage_tokens;
 
-        // Make sure leverage token at this index not already initialized
+        // Make sure leverage token at this index is not already initialized
         check!(
             quasar_group.leverage_tokens[token_index].is_empty(),
             QuasarErrorCode::Default
         )?;
 
+        const SEED: &str = "leverage_token";
+        let (pda, bump_seed) = Pubkey::find_program_address(
+            &[SEED.as_bytes(), &mango_account_ai.key.to_bytes()],
+            program_id,
+        );
+        // Make PDA address is made from the string and the mango account pubkey
+        check!(pda == *pda_ai.key, QuasarErrorCode::InvalidSignerKey)?;
+
         init_mango_account(
             mango_program_ai,
             mango_group_ai,
             mango_account_ai,
-            admin_ai,
-            &[],
+            pda_ai,
+            &[&[SEED.as_bytes(), &[bump_seed]]],
         )?;
+        msg!("Init Mango Account succeeded");
 
-        create_mint_account(
+        create_and_initialize_mint_account(
             program_id,
             admin_ai,
             mint_ai,
             token_program_ai,
             system_program_ai,
             rent_program_ai,
-            "leverage_token",
+            SEED,
             LEVERGAE_TOKEN_DECIMALS,
         )?;
 
@@ -254,7 +248,7 @@ impl Processor {
             mango_account: *mango_account_ai.key,
             mango_perp_market: *mango_perp_market_ai.key,
         };
-        quasar_group.num_base_tokens += 1;
+        quasar_group.num_leverage_tokens += 1;
 
         Ok(())
     }
@@ -314,7 +308,7 @@ impl Processor {
             rent_program_ai,
         ] = accounts;
 
-        create_mint_account(
+        create_and_initialize_mint_account(
             program_id,
             signer_ai,
             mint_ai,
@@ -365,7 +359,7 @@ fn init_mango_account<'a>(
     mango_program_ai: &AccountInfo<'a>,
     mango_group_ai: &AccountInfo<'a>,
     mango_account_ai: &AccountInfo<'a>,
-    signer_ai: &AccountInfo<'a>,
+    owner_ai: &AccountInfo<'a>,
     signers_seeds: &[&[&[u8]]],
 ) -> ProgramResult {
     let instruction = Instruction {
@@ -374,7 +368,7 @@ fn init_mango_account<'a>(
         accounts: vec![
             AccountMeta::new_readonly(*mango_group_ai.key, false),
             AccountMeta::new(*mango_account_ai.key, false),
-            AccountMeta::new_readonly(*signer_ai.key, true),
+            AccountMeta::new_readonly(*owner_ai.key, true),
         ],
     };
 
@@ -382,13 +376,13 @@ fn init_mango_account<'a>(
         mango_program_ai.clone(),
         mango_group_ai.clone(),
         mango_account_ai.clone(),
-        signer_ai.clone(),
+        owner_ai.clone(),
     ];
 
     invoke_signed(&instruction, &account_infos, signers_seeds)
 }
 
-fn create_mint_account<'a>(
+fn create_and_initialize_mint_account<'a>(
     program_id: &Pubkey,
     signer_ai: &AccountInfo<'a>,
     mint_ai: &AccountInfo<'a>, // write
