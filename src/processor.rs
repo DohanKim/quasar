@@ -66,10 +66,6 @@ impl Processor {
                 msg!("Instruction: TestCreateAccount");
                 Self::test_create_account(program_id, accounts)
             }
-            QuasarInstruction::TestInitializeMint => {
-                msg!("Instruction: TestInitializeMint");
-                Self::test_initialize_mint(program_id, accounts)
-            }
         }
     }
 
@@ -213,31 +209,30 @@ impl Processor {
             QuasarErrorCode::Default
         )?;
 
-        const SEED: &str = "leverage_token";
-        let (pda, bump_seed) = Pubkey::find_program_address(
-            &[SEED.as_bytes(), &mango_account_ai.key.to_bytes()],
-            program_id,
-        );
-        // Make PDA address is made from the string and the mango account pubkey
-        check!(pda == *pda_ai.key, QuasarErrorCode::InvalidSignerKey)?;
+        check_eq!(
+            *pda_ai.key,
+            quasar_group.signer_key,
+            QuasarErrorCode::InvalidSignerKey
+        )?;
+        let signer_seeds = gen_signer_seeds(&quasar_group.signer_nonce, quasar_group_ai.key);
 
         init_mango_account(
             mango_program_ai,
             mango_group_ai,
             mango_account_ai,
             pda_ai,
-            &[&[SEED.as_bytes(), &[bump_seed]]],
+            &[&signer_seeds],
         )?;
         msg!("Init Mango Account succeeded");
 
         create_and_initialize_mint_account(
-            program_id,
             admin_ai,
             mint_ai,
+            pda_ai,
             token_program_ai,
             system_program_ai,
             rent_program_ai,
-            SEED,
+            &[&signer_seeds],
             LEVERGAE_TOKEN_DECIMALS,
         )?;
 
@@ -289,34 +284,6 @@ impl Processor {
             10,
             &owner_ai,
             &system_program_ai,
-        )?;
-
-        Ok(())
-    }
-
-    #[inline(never)]
-    fn test_initialize_mint<'a>(program_id: &Pubkey, accounts: &[AccountInfo<'a>]) -> QuasarResult {
-        const NUM_FIXED: usize = 6;
-        let accounts = array_ref![accounts, 0, NUM_FIXED];
-
-        let [
-            program_ai,
-            signer_ai,
-            mint_ai,        // write
-            token_program_ai,
-            system_program_ai,
-            rent_program_ai,
-        ] = accounts;
-
-        create_and_initialize_mint_account(
-            program_id,
-            signer_ai,
-            mint_ai,
-            token_program_ai,
-            system_program_ai,
-            rent_program_ai,
-            "leverage_token",
-            LEVERGAE_TOKEN_DECIMALS,
         )?;
 
         Ok(())
@@ -383,13 +350,13 @@ fn init_mango_account<'a>(
 }
 
 fn create_and_initialize_mint_account<'a>(
-    program_id: &Pubkey,
     signer_ai: &AccountInfo<'a>,
-    mint_ai: &AccountInfo<'a>, // write
+    mint_ai: &AccountInfo<'a>,      // write
+    authority_ai: &AccountInfo<'a>, // write
     token_program_ai: &AccountInfo<'a>,
     system_program_ai: &AccountInfo<'a>,
     rent_program_ai: &AccountInfo<'a>,
-    seed: &str,
+    signer_seeds: &[&[&[u8]]],
     decimals: u8,
 ) -> QuasarResult {
     check_eq!(
@@ -410,8 +377,6 @@ fn create_and_initialize_mint_account<'a>(
         QuasarErrorCode::InvalidAccount
     )?;
 
-    let (pda, bump_seed) = Pubkey::find_program_address(&[seed.as_bytes()], program_id);
-
     create_account(
         &signer_ai,
         mint_ai,
@@ -425,8 +390,8 @@ fn create_and_initialize_mint_account<'a>(
     let instruction = spl_token::instruction::initialize_mint(
         token_program_ai.key,
         mint_ai.key,
-        &pda,
-        Some(&pda),
+        authority_ai.key,
+        Some(authority_ai.key),
         decimals,
     )?;
 
@@ -437,7 +402,7 @@ fn create_and_initialize_mint_account<'a>(
             token_program_ai.clone(),
             rent_program_ai.clone(),
         ],
-        &[&[seed.as_bytes(), &[bump_seed]]],
+        signer_seeds,
     )?;
 
     Ok(())

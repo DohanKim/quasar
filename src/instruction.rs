@@ -72,9 +72,6 @@ pub enum QuasarInstruction {
 
     // only for test purpose
     TestCreateAccount,
-
-    // only for test purpose
-    TestInitializeMint,
 }
 
 impl QuasarInstruction {
@@ -110,7 +107,6 @@ impl QuasarInstruction {
                 }
             }
             5 => QuasarInstruction::TestCreateAccount,
-            6 => QuasarInstruction::TestInitializeMint,
             _ => return None,
         })
     }
