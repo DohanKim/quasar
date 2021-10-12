@@ -54,9 +54,12 @@ impl Processor {
                 msg!("Instruction: AddLeverageToken");
                 Self::add_leverage_token(program_id, accounts, target_leverage)
             }
-            QuasarInstruction::MintLeverageToken { quantity } => {
+            QuasarInstruction::MintLeverageToken {
+                target_leverage,
+                quantity,
+            } => {
                 msg!("Instruction: MintLeverageToken");
-                Self::mint_leverage_token(program_id, accounts, quantity)
+                Self::mint_leverage_token(program_id, accounts, target_leverage, quantity)
             }
             QuasarInstruction::RedeemLeverageToken { quantity } => {
                 msg!("Instruction: RedeemLeverageToken");
@@ -252,13 +255,51 @@ impl Processor {
     fn mint_leverage_token<'a>(
         program_id: &Pubkey,
         accounts: &[AccountInfo<'a>],
+        target_leverage: I80F48,
+        quantity: u64,
+    ) -> QuasarResult {
+        const NUM_FIXED: usize = 12;
+        let accounts = array_ref![accounts, 0, NUM_FIXED];
+        let [quasar_group_ai, base_token_mint_ai, mango_program_ai, mango_group_ai, mango_account_ai, owner_ai, mango_cache_ai, root_bank_ai, node_bank_ai, vault_ai, token_program_ai, owner_token_account_ai] =
+            accounts;
+        // mango side:
+        let quasar_group = QuasarGroup::load_checked(quasar_group_ai, program_id)?;
+
+        // deposit to mango account
+        deposit_to_mango_account(
+            mango_program_ai,
+            mango_group_ai,
+            mango_account_ai,
+            owner_ai,
+            mango_cache_ai,
+            root_bank_ai,
+            node_bank_ai,
+            vault_ai,
+            token_program_ai,
+            owner_token_account_ai,
+            &[&[]],
+            quantity,
+        )?;
+        // buy perpetual contracts
+
+        // token side:
+        // get associated token account for lev token
+        // initialize token account for the user
+        // mint the token
+        Ok(())
+    }
+
+    #[inline(never)]
+    fn redeem_leverage_token<'a>(
+        program_id: &Pubkey,
+        accounts: &[AccountInfo<'a>],
         quantity: u64,
     ) -> QuasarResult {
         Ok(())
     }
 
     #[inline(never)]
-    fn redeem_leverage_token<'a>(
+    fn rebalance_perp_contract<'a>(
         program_id: &Pubkey,
         accounts: &[AccountInfo<'a>],
         quantity: u64,
@@ -344,6 +385,52 @@ fn init_mango_account<'a>(
         mango_group_ai.clone(),
         mango_account_ai.clone(),
         owner_ai.clone(),
+    ];
+
+    invoke_signed(&instruction, &account_infos, signers_seeds)
+}
+
+fn deposit_to_mango_account<'a>(
+    mango_program_ai: &AccountInfo<'a>,
+    mango_group_ai: &AccountInfo<'a>,
+    mango_account_ai: &AccountInfo<'a>,
+    owner_ai: &AccountInfo<'a>,
+    mango_cache_ai: &AccountInfo<'a>,
+    root_bank_ai: &AccountInfo<'a>,
+    node_bank_ai: &AccountInfo<'a>,
+    vault_ai: &AccountInfo<'a>,
+    token_program_ai: &AccountInfo<'a>,
+    owner_token_account_ai: &AccountInfo<'a>,
+    signers_seeds: &[&[&[u8]]],
+    quantity: u64,
+) -> ProgramResult {
+    let instruction = Instruction {
+        program_id: *mango_program_ai.key,
+        data: mango::instruction::MangoInstruction::Deposit { quantity }.pack(),
+        accounts: vec![
+            AccountMeta::new_readonly(*mango_group_ai.key, false),
+            AccountMeta::new(*mango_account_ai.key, false),
+            AccountMeta::new_readonly(*owner_ai.key, true),
+            AccountMeta::new_readonly(*mango_cache_ai.key, false),
+            AccountMeta::new_readonly(*root_bank_ai.key, false),
+            AccountMeta::new(*node_bank_ai.key, false),
+            AccountMeta::new(*vault_ai.key, false),
+            AccountMeta::new_readonly(*token_program_ai.key, false),
+            AccountMeta::new(*owner_token_account_ai.key, false),
+        ],
+    };
+
+    let account_infos = [
+        mango_program_ai.clone(),
+        mango_group_ai.clone(),
+        mango_account_ai.clone(),
+        owner_ai.clone(),
+        mango_cache_ai.clone(),
+        root_bank_ai.clone(),
+        node_bank_ai.clone(),
+        vault_ai.clone(),
+        token_program_ai.clone(),
+        owner_token_account_ai.clone(),
     ];
 
     invoke_signed(&instruction, &account_infos, signers_seeds)
