@@ -12,6 +12,7 @@ use solana_program::{
     system_instruction, system_program,
     sysvar::{rent::Rent, Sysvar},
 };
+use spl_associated_token_account::{create_associated_token_account, get_associated_token_address};
 use spl_token::state::{Account as TokenAccount, Mint};
 
 use mango_common::Loadable;
@@ -54,12 +55,9 @@ impl Processor {
                 msg!("Instruction: AddLeverageToken");
                 Self::add_leverage_token(program_id, accounts, target_leverage)
             }
-            QuasarInstruction::MintLeverageToken {
-                target_leverage,
-                quantity,
-            } => {
+            QuasarInstruction::MintLeverageToken { quantity } => {
                 msg!("Instruction: MintLeverageToken");
-                Self::mint_leverage_token(program_id, accounts, target_leverage, quantity)
+                Self::mint_leverage_token(program_id, accounts, quantity)
             }
             QuasarInstruction::RedeemLeverageToken { quantity } => {
                 msg!("Instruction: RedeemLeverageToken");
@@ -255,17 +253,23 @@ impl Processor {
     fn mint_leverage_token<'a>(
         program_id: &Pubkey,
         accounts: &[AccountInfo<'a>],
-        target_leverage: I80F48,
         quantity: u64,
     ) -> QuasarResult {
-        const NUM_FIXED: usize = 12;
+        const NUM_FIXED: usize = 14;
         let accounts = array_ref![accounts, 0, NUM_FIXED];
-        let [quasar_group_ai, base_token_mint_ai, mango_program_ai, mango_group_ai, mango_account_ai, owner_ai, mango_cache_ai, root_bank_ai, node_bank_ai, vault_ai, token_program_ai, owner_token_account_ai] =
+        let [quasar_group_ai, token_mint_ai, owner_leverage_token_account_ai, mango_program_ai, mango_group_ai, mango_account_ai, owner_ai, mango_cache_ai, root_bank_ai, node_bank_ai, vault_ai, token_program_ai, owner_quote_token_account_ai, pda_ai] =
             accounts;
         // mango side:
         let quasar_group = QuasarGroup::load_checked(quasar_group_ai, program_id)?;
 
-        // deposit to mango account
+        msg!("quantity: {}", quantity);
+
+        check_eq!(
+            *owner_leverage_token_account_ai.key,
+            get_associated_token_address(owner_ai.key, token_mint_ai.key),
+            QuasarErrorCode::InvalidAccount
+        );
+
         deposit_to_mango_account(
             mango_program_ai,
             mango_group_ai,
@@ -276,16 +280,22 @@ impl Processor {
             node_bank_ai,
             vault_ai,
             token_program_ai,
-            owner_token_account_ai,
+            owner_quote_token_account_ai,
             &[&[]],
             quantity,
         )?;
-        // buy perpetual contracts
+        // TODO: buy perpetual contracts
 
-        // token side:
-        // get associated token account for lev token
-        // initialize token account for the user
-        // mint the token
+        let signer_seeds = gen_signer_seeds(&quasar_group.signer_nonce, quasar_group_ai.key);
+        invoke_mint_to(
+            token_program_ai,
+            token_mint_ai,
+            owner_leverage_token_account_ai,
+            pda_ai,
+            &[&signer_seeds],
+            quantity,
+        )?;
+
         Ok(())
     }
 
@@ -361,6 +371,33 @@ fn create_account<'a>(
     ];
 
     invoke(&instruction, &account_infos)
+}
+
+fn invoke_mint_to<'a>(
+    token_program_ai: &AccountInfo<'a>,
+    mint_ai: &AccountInfo<'a>,
+    account_ai: &AccountInfo<'a>,
+    owner_ai: &AccountInfo<'a>,
+    signer_seeds: &[&[&[u8]]],
+    quantity: u64,
+) -> ProgramResult {
+    let instruction = spl_token::instruction::mint_to(
+        &spl_token::ID,
+        mint_ai.key,
+        account_ai.key,
+        owner_ai.key,
+        &[],
+        quantity,
+    )?;
+
+    let account_infos = [
+        token_program_ai.clone(),
+        mint_ai.clone(),
+        account_ai.clone(),
+        owner_ai.clone(),
+    ];
+
+    solana_program::program::invoke_signed(&instruction, &account_infos, signer_seeds)
 }
 
 fn init_mango_account<'a>(

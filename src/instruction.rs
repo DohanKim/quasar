@@ -52,7 +52,6 @@ pub enum QuasarInstruction {
     /// 4. `[]` oracle_ai
     /// 8. `[signer]` admin_ai
     MintLeverageToken {
-        target_leverage: I80F48,
         quantity: u64,
     },
 
@@ -96,16 +95,15 @@ impl QuasarInstruction {
                 }
             }
             3 => {
-                let data = array_ref![data, 0, 24];
-                let (target_leverage, quantity) = array_refs![data, 16, 8];
+                let quantity = array_ref![data, 0, 8];
 
                 QuasarInstruction::MintLeverageToken {
-                    target_leverage: I80F48::from_le_bytes(*target_leverage),
                     quantity: u64::from_le_bytes(*quantity),
                 }
             }
             4 => {
                 let quantity = array_ref![data, 0, 8];
+
                 QuasarInstruction::RedeemLeverageToken {
                     quantity: u64::from_le_bytes(*quantity),
                 }
