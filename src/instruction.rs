@@ -12,9 +12,7 @@ pub enum QuasarInstruction {
     /// 1. `[signer]` signer_ai
     /// 2. `[]` admin_ai
     /// 3. `[]` mango_program_ai    
-    InitQuasarGroup {
-        signer_nonce: u64,
-    },
+    InitQuasarGroup { signer_nonce: u64 },
 
     /// Add a base token which leveraged tokens are going to use as the underlying
     ///
@@ -36,9 +34,7 @@ pub enum QuasarInstruction {
     /// 3. `[]` mango_account_ai
     /// 4. `[]` mango_perp_market_ai
     /// 5. `[signer]` admin_ai
-    AddLeverageToken {
-        target_leverage: I80F48,
-    },
+    AddLeverageToken { target_leverage: I80F48 },
 
     /// mint a leveraged token
     ///
@@ -51,9 +47,7 @@ pub enum QuasarInstruction {
     /// 4. `[]` base_token_mint_ai
     /// 4. `[]` oracle_ai
     /// 8. `[signer]` admin_ai
-    MintLeverageToken {
-        quantity: u64,
-    },
+    MintLeverageToken { quantity: u64 },
 
     /// redeem a leveraged token
     ///
@@ -66,12 +60,7 @@ pub enum QuasarInstruction {
     /// 4. `[]` base_token_mint_ai
     /// 4. `[]` oracle_ai
     /// 8. `[signer]` admin_ai
-    RedeemLeverageToken {
-        quantity: u64,
-    },
-
-    // only for test purpose
-    TestCreateAccount,
+    BurnLeverageToken { quantity: u64 },
 }
 
 impl QuasarInstruction {
@@ -104,11 +93,10 @@ impl QuasarInstruction {
             4 => {
                 let quantity = array_ref![data, 0, 8];
 
-                QuasarInstruction::RedeemLeverageToken {
+                QuasarInstruction::BurnLeverageToken {
                     quantity: u64::from_le_bytes(*quantity),
                 }
             }
-            5 => QuasarInstruction::TestCreateAccount,
             _ => return None,
         })
     }

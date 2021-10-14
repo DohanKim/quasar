@@ -1,5 +1,9 @@
 use std::mem::size_of;
 
+use mango::{
+    matching::{OrderType, Side},
+    state::MAX_PAIRS,
+};
 use solana_program::{
     account_info::{next_account_info, Account, AccountInfo},
     entrypoint::ProgramResult,
@@ -59,13 +63,9 @@ impl Processor {
                 msg!("Instruction: MintLeverageToken");
                 Self::mint_leverage_token(program_id, accounts, quantity)
             }
-            QuasarInstruction::RedeemLeverageToken { quantity } => {
-                msg!("Instruction: RedeemLeverageToken");
-                Self::redeem_leverage_token(program_id, accounts, quantity)
-            }
-            QuasarInstruction::TestCreateAccount => {
-                msg!("Instruction: TestCreateAccount");
-                Self::test_create_account(program_id, accounts)
+            QuasarInstruction::BurnLeverageToken { quantity } => {
+                msg!("Instruction: BurnLeverageToken");
+                Self::burn_leverage_token(program_id, accounts, quantity)
             }
         }
     }
@@ -259,10 +259,8 @@ impl Processor {
         let accounts = array_ref![accounts, 0, NUM_FIXED];
         let [quasar_group_ai, token_mint_ai, owner_leverage_token_account_ai, mango_program_ai, mango_group_ai, mango_account_ai, owner_ai, mango_cache_ai, root_bank_ai, node_bank_ai, vault_ai, token_program_ai, owner_quote_token_account_ai, pda_ai] =
             accounts;
-        // mango side:
-        let quasar_group = QuasarGroup::load_checked(quasar_group_ai, program_id)?;
 
-        msg!("quantity: {}", quantity);
+        let quasar_group = QuasarGroup::load_checked(quasar_group_ai, program_id)?;
 
         check_eq!(
             *owner_leverage_token_account_ai.key,
@@ -270,6 +268,14 @@ impl Processor {
             QuasarErrorCode::InvalidAccount
         );
 
+        let leverage_token_index =
+            quasar_group.find_leverage_token_index_by_mint(token_mint_ai.key);
+        check!(
+            leverage_token_index.is_some(),
+            QuasarErrorCode::InvalidToken
+        );
+
+        // TODO: calculate quote token quantity
         deposit_to_mango_account(
             mango_program_ai,
             mango_group_ai,
@@ -284,7 +290,6 @@ impl Processor {
             &[&[]],
             quantity,
         )?;
-        // TODO: buy perpetual contracts
 
         let signer_seeds = gen_signer_seeds(&quasar_group.signer_nonce, quasar_group_ai.key);
         invoke_mint_to(
@@ -300,11 +305,62 @@ impl Processor {
     }
 
     #[inline(never)]
-    fn redeem_leverage_token<'a>(
+    fn burn_leverage_token<'a>(
         program_id: &Pubkey,
         accounts: &[AccountInfo<'a>],
         quantity: u64,
     ) -> QuasarResult {
+        const NUM_FIXED: usize = 15;
+        let accounts = array_ref![accounts, 0, NUM_FIXED + MAX_PAIRS];
+        let (fixed_ais, mango_open_orders_ais) = array_refs![accounts, NUM_FIXED, MAX_PAIRS];
+        let [quasar_group_ai, token_mint_ai, owner_leverage_token_account_ai, mango_program_ai, mango_group_ai, mango_account_ai, owner_ai, mango_cache_ai, root_bank_ai, node_bank_ai, vault_ai, token_program_ai, owner_quote_token_account_ai, pda_ai, mango_signer_ai] =
+            fixed_ais;
+
+        let quasar_group = QuasarGroup::load_checked(quasar_group_ai, program_id)?;
+
+        check_eq!(
+            *owner_leverage_token_account_ai.key,
+            get_associated_token_address(owner_ai.key, token_mint_ai.key),
+            QuasarErrorCode::InvalidAccount
+        );
+
+        let leverage_token_index =
+            quasar_group.find_leverage_token_index_by_mint(token_mint_ai.key);
+        check!(
+            leverage_token_index.is_some(),
+            QuasarErrorCode::InvalidToken
+        );
+
+        // TODO: calculate quote token quantity
+        invoke_burn(
+            token_program_ai,
+            owner_leverage_token_account_ai,
+            token_mint_ai,
+            owner_ai,
+            &[],
+            quantity,
+        )?;
+
+        let signer_seeds = gen_signer_seeds(&quasar_group.signer_nonce, quasar_group_ai.key);
+
+        withdraw_from_mango_account(
+            mango_program_ai,
+            mango_group_ai,
+            mango_account_ai,
+            pda_ai,
+            mango_cache_ai,
+            root_bank_ai,
+            node_bank_ai,
+            vault_ai,
+            owner_quote_token_account_ai,
+            mango_signer_ai,
+            token_program_ai,
+            mango_open_orders_ais,
+            &[&signer_seeds],
+            quantity,
+            false,
+        )?;
+
         Ok(())
     }
 
@@ -314,28 +370,31 @@ impl Processor {
         accounts: &[AccountInfo<'a>],
         quantity: u64,
     ) -> QuasarResult {
-        Ok(())
-    }
+        // maybe we can just rebalance here
+        // let leverage_token = quasar_group.leverage_tokens[leverage_token_index.unwrap()];
+        // check_eq!(
+        //     leverage_token.mango_perp_market,
+        //     *mango_perp_market_ai.key,
+        //     QuasarErrorCode::InvalidAccount
+        // );
 
-    #[inline(never)]
-    fn test_create_account<'a>(program_id: &Pubkey, accounts: &[AccountInfo<'a>]) -> QuasarResult {
-        const NUM_FIXED: usize = 4;
-        let accounts = array_ref![accounts, 0, NUM_FIXED];
-
-        let [
-            signer_ai,        // write
-            owner_ai,        // read
-            new_account_ai,
-            system_program_ai,
-        ] = accounts;
-
-        create_account(
-            &signer_ai,
-            new_account_ai,
-            10,
-            &owner_ai,
-            &system_program_ai,
-        )?;
+        // place_mango_perp_order(
+        //     mango_program_ai,
+        //     mango_group_ai,
+        //     mango_account_ai,
+        //     owner_ai,
+        //     mango_cache_ai,
+        //     mango_perp_market_ai,
+        //     mango_bids_ai,
+        //     mango_asks_ai,
+        //     mango_event_queue_ai,
+        //     &[&signer_seeds],
+        //     100 as i64,
+        //     3 as i64,
+        //     0,
+        //     Side::Bid,
+        //     OrderType::Limit,
+        // );
 
         Ok(())
     }
@@ -385,6 +444,33 @@ fn invoke_mint_to<'a>(
         &spl_token::ID,
         mint_ai.key,
         account_ai.key,
+        owner_ai.key,
+        &[],
+        quantity,
+    )?;
+
+    let account_infos = [
+        token_program_ai.clone(),
+        mint_ai.clone(),
+        account_ai.clone(),
+        owner_ai.clone(),
+    ];
+
+    solana_program::program::invoke_signed(&instruction, &account_infos, signer_seeds)
+}
+
+fn invoke_burn<'a>(
+    token_program_ai: &AccountInfo<'a>,
+    account_ai: &AccountInfo<'a>,
+    mint_ai: &AccountInfo<'a>,
+    owner_ai: &AccountInfo<'a>,
+    signer_seeds: &[&[&[u8]]],
+    quantity: u64,
+) -> ProgramResult {
+    let instruction = spl_token::instruction::burn(
+        &spl_token::ID,
+        account_ai.key,
+        mint_ai.key,
         owner_ai.key,
         &[],
         quantity,
@@ -468,6 +554,125 @@ fn deposit_to_mango_account<'a>(
         vault_ai.clone(),
         token_program_ai.clone(),
         owner_token_account_ai.clone(),
+    ];
+
+    invoke_signed(&instruction, &account_infos, signers_seeds)
+}
+
+fn withdraw_from_mango_account<'a>(
+    mango_program_ai: &AccountInfo<'a>,
+    mango_group_ai: &AccountInfo<'a>,
+    mango_account_ai: &AccountInfo<'a>,
+    owner_ai: &AccountInfo<'a>,
+    mango_cache_ai: &AccountInfo<'a>,
+    root_bank_ai: &AccountInfo<'a>,
+    node_bank_ai: &AccountInfo<'a>,
+    vault_ai: &AccountInfo<'a>,
+    owner_token_account_ai: &AccountInfo<'a>,
+    signer_ai: &AccountInfo<'a>,
+    token_program_ai: &AccountInfo<'a>,
+    mango_open_orders_ais: &[AccountInfo<'a>; MAX_PAIRS],
+    signers_seeds: &[&[&[u8]]],
+    quantity: u64,
+    allow_borrow: bool,
+) -> ProgramResult {
+    let mut accounts = vec![
+        AccountMeta::new_readonly(*mango_group_ai.key, false),
+        AccountMeta::new(*mango_account_ai.key, false),
+        AccountMeta::new_readonly(*owner_ai.key, true),
+        AccountMeta::new_readonly(*mango_cache_ai.key, false),
+        AccountMeta::new_readonly(*root_bank_ai.key, false),
+        AccountMeta::new(*node_bank_ai.key, false),
+        AccountMeta::new(*vault_ai.key, false),
+        AccountMeta::new(*owner_token_account_ai.key, false),
+        AccountMeta::new_readonly(*signer_ai.key, false),
+        AccountMeta::new_readonly(*token_program_ai.key, false),
+    ];
+    accounts.extend(
+        mango_open_orders_ais
+            .iter()
+            .map(|ai| AccountMeta::new_readonly(*ai.key, false)),
+    );
+
+    let instruction = Instruction {
+        program_id: *mango_program_ai.key,
+        data: mango::instruction::MangoInstruction::Withdraw {
+            quantity,
+            allow_borrow,
+        }
+        .pack(),
+        accounts: accounts,
+    };
+
+    let mut account_infos = [
+        mango_program_ai.clone(),
+        mango_group_ai.clone(),
+        mango_account_ai.clone(),
+        owner_ai.clone(),
+        mango_cache_ai.clone(),
+        root_bank_ai.clone(),
+        node_bank_ai.clone(),
+        vault_ai.clone(),
+        owner_token_account_ai.clone(),
+        signer_ai.clone(),
+        token_program_ai.clone(),
+    ]
+    .to_vec();
+    account_infos.extend(mango_open_orders_ais.iter().map(|ai| ai.clone()));
+    let account_infos = account_infos.as_slice();
+
+    invoke_signed(&instruction, account_infos, signers_seeds)
+}
+
+fn place_mango_perp_order<'a>(
+    mango_program_ai: &AccountInfo<'a>,
+    mango_group_ai: &AccountInfo<'a>,
+    mango_account_ai: &AccountInfo<'a>,
+    owner_ai: &AccountInfo<'a>,
+    mango_cache_ai: &AccountInfo<'a>,
+    mango_perp_market_ai: &AccountInfo<'a>,
+    mango_bids_ai: &AccountInfo<'a>,
+    mango_asks_ai: &AccountInfo<'a>,
+    mango_event_queue_ai: &AccountInfo<'a>,
+    signers_seeds: &[&[&[u8]]],
+    price: i64,
+    quantity: i64,
+    client_order_id: u64,
+    side: Side,
+    order_type: OrderType,
+) -> ProgramResult {
+    let instruction = Instruction {
+        program_id: *mango_program_ai.key,
+        data: mango::instruction::MangoInstruction::PlacePerpOrder {
+            price,
+            quantity,
+            client_order_id,
+            side,
+            order_type,
+        }
+        .pack(),
+        accounts: vec![
+            AccountMeta::new_readonly(*mango_group_ai.key, false),
+            AccountMeta::new(*mango_account_ai.key, false),
+            AccountMeta::new_readonly(*owner_ai.key, true),
+            AccountMeta::new_readonly(*mango_cache_ai.key, false),
+            AccountMeta::new(*mango_perp_market_ai.key, false),
+            AccountMeta::new(*mango_bids_ai.key, false),
+            AccountMeta::new(*mango_asks_ai.key, false),
+            AccountMeta::new(*mango_event_queue_ai.key, false),
+        ],
+    };
+
+    let account_infos = [
+        mango_program_ai.clone(),
+        mango_group_ai.clone(),
+        mango_account_ai.clone(),
+        owner_ai.clone(),
+        mango_cache_ai.clone(),
+        mango_perp_market_ai.clone(),
+        mango_bids_ai.clone(),
+        mango_asks_ai.clone(),
+        mango_event_queue_ai.clone(),
     ];
 
     invoke_signed(&instruction, &account_infos, signers_seeds)

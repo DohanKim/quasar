@@ -119,6 +119,12 @@ impl QuasarGroup {
         })
     }
 
+    pub fn find_leverage_token_index_by_mint(&self, token_mint: &Pubkey) -> Option<usize> {
+        self.leverage_tokens
+            .iter()
+            .position(|lt| lt.mint == *token_mint)
+    }
+
     pub fn find_base_token_index(&self, base_token_mint: &Pubkey) -> Option<usize> {
         self.base_tokens
             .iter()
