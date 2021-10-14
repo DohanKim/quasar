@@ -9,6 +9,7 @@ use solana_program::{
     entrypoint::ProgramResult,
     instruction::{AccountMeta, Instruction},
     msg,
+    native_token::LAMPORTS_PER_SOL,
     program::{invoke, invoke_signed},
     program_error::ProgramError,
     program_pack::{IsInitialized, Pack},
@@ -66,6 +67,10 @@ impl Processor {
             QuasarInstruction::BurnLeverageToken { quantity } => {
                 msg!("Instruction: BurnLeverageToken");
                 Self::burn_leverage_token(program_id, accounts, quantity)
+            }
+            QuasarInstruction::Rebalance => {
+                msg!("Instruction: Rebalance");
+                Self::rebalance(program_id, accounts)
             }
         }
     }
@@ -288,7 +293,7 @@ impl Processor {
             token_program_ai,
             owner_quote_token_account_ai,
             &[&[]],
-            quantity,
+            quantity * LAMPORTS_PER_SOL,
         )?;
 
         let signer_seeds = gen_signer_seeds(&quasar_group.signer_nonce, quasar_group_ai.key);
@@ -357,7 +362,7 @@ impl Processor {
             token_program_ai,
             mango_open_orders_ais,
             &[&signer_seeds],
-            quantity,
+            quantity * LAMPORTS_PER_SOL,
             false,
         )?;
 
@@ -365,36 +370,49 @@ impl Processor {
     }
 
     #[inline(never)]
-    fn rebalance_perp_contract<'a>(
-        program_id: &Pubkey,
-        accounts: &[AccountInfo<'a>],
-        quantity: u64,
-    ) -> QuasarResult {
-        // maybe we can just rebalance here
-        // let leverage_token = quasar_group.leverage_tokens[leverage_token_index.unwrap()];
-        // check_eq!(
-        //     leverage_token.mango_perp_market,
-        //     *mango_perp_market_ai.key,
-        //     QuasarErrorCode::InvalidAccount
-        // );
+    fn rebalance<'a>(program_id: &Pubkey, accounts: &[AccountInfo<'a>]) -> QuasarResult {
+        const NUM_FIXED: usize = 12;
+        let accounts = array_ref![accounts, 0, NUM_FIXED + MAX_PAIRS];
+        let (fixed_ais, mango_open_orders_ais) = array_refs![accounts, NUM_FIXED, MAX_PAIRS];
+        let [quasar_group_ai, token_mint_ai, pda_ai, mango_program_ai, mango_group_ai, mango_account_ai, owner_ai, mango_cache_ai, mango_perp_market_ai, mango_bids_ai, mango_asks_ai, mango_event_queue_ai] =
+            fixed_ais;
 
-        // place_mango_perp_order(
-        //     mango_program_ai,
-        //     mango_group_ai,
-        //     mango_account_ai,
-        //     owner_ai,
-        //     mango_cache_ai,
-        //     mango_perp_market_ai,
-        //     mango_bids_ai,
-        //     mango_asks_ai,
-        //     mango_event_queue_ai,
-        //     &[&signer_seeds],
-        //     100 as i64,
-        //     3 as i64,
-        //     0,
-        //     Side::Bid,
-        //     OrderType::Limit,
-        // );
+        let quasar_group = QuasarGroup::load_checked(quasar_group_ai, program_id)?;
+
+        let leverage_token_index =
+            quasar_group.find_leverage_token_index_by_mint(token_mint_ai.key);
+        check!(
+            leverage_token_index.is_some(),
+            QuasarErrorCode::InvalidToken
+        );
+
+        let leverage_token = quasar_group.leverage_tokens[leverage_token_index.unwrap()];
+        check_eq!(
+            leverage_token.mango_perp_market,
+            *mango_perp_market_ai.key,
+            QuasarErrorCode::InvalidAccount
+        );
+
+        let signer_seeds = gen_signer_seeds(&quasar_group.signer_nonce, quasar_group_ai.key);
+
+        place_mango_perp_order(
+            mango_program_ai,
+            mango_group_ai,
+            mango_account_ai,
+            pda_ai,
+            mango_cache_ai,
+            mango_perp_market_ai,
+            mango_bids_ai,
+            mango_asks_ai,
+            mango_event_queue_ai,
+            mango_open_orders_ais,
+            &[&signer_seeds],
+            100 as i64,
+            1 as i64,
+            0,
+            Side::Bid,
+            OrderType::Limit,
+        )?;
 
         Ok(())
     }
@@ -634,6 +652,7 @@ fn place_mango_perp_order<'a>(
     mango_bids_ai: &AccountInfo<'a>,
     mango_asks_ai: &AccountInfo<'a>,
     mango_event_queue_ai: &AccountInfo<'a>,
+    mango_open_orders_ais: &[AccountInfo<'a>; MAX_PAIRS],
     signers_seeds: &[&[&[u8]]],
     price: i64,
     quantity: i64,
@@ -641,6 +660,37 @@ fn place_mango_perp_order<'a>(
     side: Side,
     order_type: OrderType,
 ) -> ProgramResult {
+    let mut accounts = vec![
+        AccountMeta::new_readonly(*mango_group_ai.key, false),
+        AccountMeta::new(*mango_account_ai.key, false),
+        AccountMeta::new_readonly(*owner_ai.key, true),
+        AccountMeta::new_readonly(*mango_cache_ai.key, false),
+        AccountMeta::new(*mango_perp_market_ai.key, false),
+        AccountMeta::new(*mango_bids_ai.key, false),
+        AccountMeta::new(*mango_asks_ai.key, false),
+        AccountMeta::new(*mango_event_queue_ai.key, false),
+    ];
+    accounts.extend(
+        mango_open_orders_ais
+            .iter()
+            .map(|ai| AccountMeta::new_readonly(*ai.key, false)),
+    );
+
+    let mut account_infos = [
+        mango_program_ai.clone(),
+        mango_group_ai.clone(),
+        mango_account_ai.clone(),
+        owner_ai.clone(),
+        mango_cache_ai.clone(),
+        mango_perp_market_ai.clone(),
+        mango_bids_ai.clone(),
+        mango_asks_ai.clone(),
+        mango_event_queue_ai.clone(),
+    ]
+    .to_vec();
+    account_infos.extend(mango_open_orders_ais.iter().map(|ai| ai.clone()));
+    let account_infos = account_infos.as_slice();
+
     let instruction = Instruction {
         program_id: *mango_program_ai.key,
         data: mango::instruction::MangoInstruction::PlacePerpOrder {
@@ -651,29 +701,8 @@ fn place_mango_perp_order<'a>(
             order_type,
         }
         .pack(),
-        accounts: vec![
-            AccountMeta::new_readonly(*mango_group_ai.key, false),
-            AccountMeta::new(*mango_account_ai.key, false),
-            AccountMeta::new_readonly(*owner_ai.key, true),
-            AccountMeta::new_readonly(*mango_cache_ai.key, false),
-            AccountMeta::new(*mango_perp_market_ai.key, false),
-            AccountMeta::new(*mango_bids_ai.key, false),
-            AccountMeta::new(*mango_asks_ai.key, false),
-            AccountMeta::new(*mango_event_queue_ai.key, false),
-        ],
+        accounts: accounts,
     };
-
-    let account_infos = [
-        mango_program_ai.clone(),
-        mango_group_ai.clone(),
-        mango_account_ai.clone(),
-        owner_ai.clone(),
-        mango_cache_ai.clone(),
-        mango_perp_market_ai.clone(),
-        mango_bids_ai.clone(),
-        mango_asks_ai.clone(),
-        mango_event_queue_ai.clone(),
-    ];
 
     invoke_signed(&instruction, &account_infos, signers_seeds)
 }

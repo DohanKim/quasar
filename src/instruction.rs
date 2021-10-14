@@ -61,6 +61,19 @@ pub enum QuasarInstruction {
     /// 4. `[]` oracle_ai
     /// 8. `[signer]` admin_ai
     BurnLeverageToken { quantity: u64 },
+
+    /// rebalance a leveraged token
+    ///
+    /// Accounts expected by this instruction (8):
+    ///
+    /// 0. `[writable]` quasar_group_ai
+    /// 2. `[]` leverage_token_ai
+    /// 3. `[]` mango_program_ai
+    /// 4. `[]` mint_ai
+    /// 4. `[]` base_token_mint_ai
+    /// 4. `[]` oracle_ai
+    /// 8. `[signer]` admin_ai
+    Rebalance,
 }
 
 impl QuasarInstruction {
@@ -97,6 +110,7 @@ impl QuasarInstruction {
                     quantity: u64::from_le_bytes(*quantity),
                 }
             }
+            5 => Self::Rebalance,
             _ => return None,
         })
     }
