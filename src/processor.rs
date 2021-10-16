@@ -2,7 +2,9 @@ use std::{cell::Ref, mem::size_of};
 
 use mango::{
     matching::{OrderType, Side},
-    state::{MangoAccount, MangoCache, MangoGroup, RootBankCache, MAX_PAIRS, ZERO_I80F48},
+    state::{
+        MangoAccount, MangoCache, MangoGroup, RootBankCache, MAX_PAIRS, QUOTE_INDEX, ZERO_I80F48,
+    },
 };
 use solana_program::{
     account_info::{next_account_info, Account, AccountInfo},
@@ -241,6 +243,7 @@ impl Processor {
             &[&signer_seeds],
             LEVERGAE_TOKEN_DECIMALS,
         )?;
+        msg!("target leverage: {}", target_leverage);
 
         quasar_group.leverage_tokens[token_index] = LeverageToken {
             mint: *mint_ai.key,
@@ -379,68 +382,129 @@ impl Processor {
 
         let quasar_group = QuasarGroup::load_checked(quasar_group_ai, program_id)?;
 
-        let leverage_token_index =
-            quasar_group.find_leverage_token_index_by_mint(token_mint_ai.key);
-        check!(
-            leverage_token_index.is_some(),
-            QuasarErrorCode::InvalidToken
-        );
+        let leverage_token_index = quasar_group
+            .find_leverage_token_index_by_mint(token_mint_ai.key)
+            .unwrap();
+        let leverage_token = quasar_group.leverage_tokens[leverage_token_index];
 
-        let leverage_token = quasar_group.leverage_tokens[leverage_token_index.unwrap()];
+        check_eq!(
+            leverage_token.mango_account,
+            *mango_account_ai.key,
+            QuasarErrorCode::InvalidAccount
+        );
         check_eq!(
             leverage_token.mango_perp_market,
             *mango_perp_market_ai.key,
             QuasarErrorCode::InvalidAccount
         );
 
-        let mango_group = MangoGroup::load_checked(mango_group_ai, mango_program_ai.key)?;
-        let mango_cache =
-            MangoCache::load_checked(mango_cache_ai, mango_program_ai.key, &mango_group)?;
+        // might cause an error if any market has a different quote token
+        let mut price;
+        let mut quantity;
+        {
+            let mango_group = MangoGroup::load_checked(&mango_group_ai, mango_program_ai.key)?;
+            let mango_cache =
+                MangoCache::load_checked(&mango_cache_ai, mango_program_ai.key, &mango_group)?;
 
-        let mango_account: Ref<MangoAccount> =
-            MangoAccount::load_checked(mango_account_ai, mango_program_ai.key, mango_group_ai.key)?;
-
-        let mut net_asset_value = ZERO_I80F48;
-        let mut perp_asset_value = ZERO_I80F48;
-
-        let market_index = mango_group
-            .find_perp_market_index(&leverage_token.mango_perp_market)
-            .unwrap();
-
-        for i in 0..mango_group.num_oracles {
-            let spot_value = get_mango_spot_value(
-                &mango_account,
-                &mango_cache.root_bank_cache[i],
-                mango_cache.price_cache[i].price,
-                i,
-                &mango_open_orders_ais[i],
+            let mango_account = MangoAccount::load_checked(
+                &mango_account_ai,
+                mango_program_ai.key,
+                mango_group_ai.key,
             )?;
 
-            let (perp_base_value, perp_quote_value) = mango_account.perp_accounts[i].get_val(
-                &mango_group.perp_markets[i],
-                &mango_cache.perp_market_cache[i],
-                mango_cache.price_cache[i].price,
-            )?;
+            let mut net_asset_value = ZERO_I80F48;
+            let mut perp_asset_value = ZERO_I80F48;
 
-            net_asset_value = net_asset_value
-                .checked_add(
-                    spot_value
-                        .checked_add(perp_base_value.checked_add(perp_quote_value).unwrap())
-                        .unwrap(),
-                )
+            let market_index = mango_group
+                .find_perp_market_index(&leverage_token.mango_perp_market)
                 .unwrap();
 
-            perp_asset_value = perp_asset_value.checked_add(perp_base_value).unwrap();
+            for i in 0..mango_group.num_oracles {
+                let spot_value = get_mango_spot_value(
+                    &mango_account,
+                    &mango_cache.root_bank_cache[i],
+                    mango_cache.price_cache[i].price,
+                    i,
+                )?;
+
+                let (perp_base_value, perp_quote_value) = mango_account.perp_accounts[i].get_val(
+                    &mango_group.perp_markets[i],
+                    &mango_cache.perp_market_cache[i],
+                    mango_cache.price_cache[i].price,
+                )?;
+
+                msg!(
+                    "market {}: spot {} / perp_base {} / perp_quote {}",
+                    i,
+                    spot_value,
+                    perp_base_value,
+                    perp_quote_value,
+                );
+
+                net_asset_value = net_asset_value
+                    .checked_add(
+                        spot_value
+                            .checked_add(perp_base_value.checked_add(perp_quote_value).unwrap())
+                            .unwrap(),
+                    )
+                    .unwrap();
+
+                perp_asset_value = perp_asset_value.checked_add(perp_base_value).unwrap();
+            }
+
+            msg!("net asset value: {}", net_asset_value);
+            msg!("perp asset value: {}", perp_asset_value);
+            msg!("effective leverage: {}", perp_asset_value / net_asset_value);
+
+            price = mango_cache.price_cache[market_index].price;
+            msg!("price: {}", price);
+            let target_exposure = net_asset_value
+                .checked_mul(leverage_token.target_leverage)
+                .unwrap();
+            msg!("target leverage: {}", leverage_token.target_leverage);
+            msg!("target exposure: {}", target_exposure);
+            msg!("current exposure: {}", perp_asset_value);
+
+            let base_decimals = mango_group.tokens[market_index].decimals;
+            let base_unit = 10u64.pow(base_decimals.into());
+            let base_lot_size =
+                I80F48::from_num(mango_group.perp_markets[market_index].base_lot_size);
+
+            let quote_decimals = mango_group.tokens[QUOTE_INDEX].decimals;
+            let quote_unit = 10u64.pow(quote_decimals.into());
+            let quote_lot_size =
+                I80F48::from_num(mango_group.perp_markets[market_index].quote_lot_size);
+
+            let exposure_delta = target_exposure.checked_sub(perp_asset_value).unwrap();
+            msg!("exposure delta in native quote unit: {}", exposure_delta);
+
+            price = price
+                .checked_mul(I80F48::from_num(quote_unit))
+                .unwrap()
+                .checked_mul(base_lot_size)
+                .unwrap()
+                .checked_div(quote_lot_size)
+                .unwrap()
+                .checked_div(I80F48::from_num(base_unit))
+                .unwrap();
+            msg!("price in quote lot unit: {}", price);
+
+            let exposure_delta = exposure_delta
+                .checked_div(I80F48::from_num(quote_lot_size))
+                .unwrap();
+            msg!("exposure delta in quote lot unit: {}", exposure_delta);
+
+            quantity = exposure_delta.checked_div(price).unwrap();
+            msg!("perp quantity to adjust in base lot unit: {}", quantity);
         }
 
-        let price = mango_cache.price_cache[market_index].price;
-        let target_exposure = net_asset_value
-            .checked_mul(leverage_token.target_leverage)
-            .unwrap();
-        let exposure_delta = perp_asset_value.checked_sub(target_exposure).unwrap();
-        let perp_quantity_delta = exposure_delta.checked_div(price).unwrap();
-
         let signer_seeds = gen_signer_seeds(&quasar_group.signer_nonce, quasar_group_ai.key);
+
+        msg!(
+            "price: {}, quantity: {}",
+            price.to_num::<i64>(),
+            quantity.abs().to_num::<i64>()
+        );
 
         place_mango_perp_order(
             mango_program_ai,
@@ -455,9 +519,13 @@ impl Processor {
             mango_open_orders_ais,
             &[&signer_seeds],
             price.to_num::<i64>(),
-            perp_quantity_delta.to_num::<i64>(),
+            quantity.abs().to_num::<i64>(),
             0,
-            Side::Bid,
+            if quantity > ZERO_I80F48 {
+                Side::Bid
+            } else {
+                Side::Ask
+            },
             OrderType::Limit,
         )?;
 
@@ -470,7 +538,6 @@ fn get_mango_spot_value(
     bank_cache: &RootBankCache,
     price: I80F48,
     market_index: usize,
-    open_orders_ai: &AccountInfo,
 ) -> QuasarResult<I80F48> {
     let base_net = if mango_account.deposits[market_index].is_positive() {
         mango_account.deposits[market_index]

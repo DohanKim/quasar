@@ -11,7 +11,7 @@ spl-token = {version = "3.1.1", features = ["no-entrypoint"]}
 spl-associated-token-account = "1.0.3"
 thiserror = "1.0.24"
 arrayref = "0.3.6"
-fixed = "=1.9.0"
+fixed ={version = "=1.9.0", features = ["serde"]} 
 num_enum = "^0.5.1"
 bytemuck = "^1.7.2"
 mango = { git = "https://github.com/blockworks-foundation/mango-v3.git",  features = ["no-entrypoint"] }
