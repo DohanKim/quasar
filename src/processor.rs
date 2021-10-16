@@ -34,7 +34,7 @@ use crate::{
     instruction::QuasarInstruction,
     oracle::{determine_oracle_type, OracleType, Price, StubOracle},
     state::{BaseToken, DataType, LeverageToken, MetaData, QuasarGroup, LEVERGAE_TOKEN_DECIMALS},
-    utils::{gen_signer_key, gen_signer_seeds},
+    utils::{gen_signer_key, gen_signer_seeds, get_mango_spot_value},
 };
 
 declare_check_assert_macros!(SourceFileId::Processor);
@@ -270,20 +270,42 @@ impl Processor {
 
         let quasar_group = QuasarGroup::load_checked(quasar_group_ai, program_id)?;
 
-        check_eq!(
-            *owner_leverage_token_account_ai.key,
-            get_associated_token_address(owner_ai.key, token_mint_ai.key),
-            QuasarErrorCode::InvalidAccount
-        );
+        let native_price;
+        {
+            let mango_group = MangoGroup::load_checked(&mango_group_ai, mango_program_ai.key)?;
+            let mango_cache =
+                MangoCache::load_checked(&mango_cache_ai, mango_program_ai.key, &mango_group)?;
+            let mango_account = MangoAccount::load_checked(
+                &mango_account_ai,
+                mango_program_ai.key,
+                mango_group_ai.key,
+            )?;
 
-        let leverage_token_index =
-            quasar_group.find_leverage_token_index_by_mint(token_mint_ai.key);
-        check!(
-            leverage_token_index.is_some(),
-            QuasarErrorCode::InvalidToken
-        );
+            check_eq!(
+                *owner_leverage_token_account_ai.key,
+                get_associated_token_address(owner_ai.key, token_mint_ai.key),
+                QuasarErrorCode::InvalidAccount
+            );
 
-        // TODO: calculate quote token quantity
+            let leverage_token_index = quasar_group
+                .find_leverage_token_index_by_mint(token_mint_ai.key)
+                .unwrap();
+            let leverage_token = quasar_group.leverage_tokens[leverage_token_index];
+
+            check_eq!(
+                leverage_token.mango_account,
+                *mango_account_ai.key,
+                QuasarErrorCode::InvalidAccount
+            );
+
+            native_price = leverage_token.get_native_price(
+                token_mint_ai,
+                &mango_group,
+                &mango_account,
+                &mango_cache,
+            )?;
+        }
+
         deposit_to_mango_account(
             mango_program_ai,
             mango_group_ai,
@@ -296,7 +318,7 @@ impl Processor {
             token_program_ai,
             owner_quote_token_account_ai,
             &[&[]],
-            quantity * LAMPORTS_PER_SOL,
+            quantity * native_price.to_num::<u64>(),
         )?;
 
         let signer_seeds = gen_signer_seeds(&quasar_group.signer_nonce, quasar_group_ai.key);
@@ -339,7 +361,42 @@ impl Processor {
             QuasarErrorCode::InvalidToken
         );
 
-        // TODO: calculate quote token quantity
+        let native_price;
+        {
+            let mango_group = MangoGroup::load_checked(&mango_group_ai, mango_program_ai.key)?;
+            let mango_cache =
+                MangoCache::load_checked(&mango_cache_ai, mango_program_ai.key, &mango_group)?;
+            let mango_account = MangoAccount::load_checked(
+                &mango_account_ai,
+                mango_program_ai.key,
+                mango_group_ai.key,
+            )?;
+
+            check_eq!(
+                *owner_leverage_token_account_ai.key,
+                get_associated_token_address(owner_ai.key, token_mint_ai.key),
+                QuasarErrorCode::InvalidAccount
+            );
+
+            let leverage_token_index = quasar_group
+                .find_leverage_token_index_by_mint(token_mint_ai.key)
+                .unwrap();
+            let leverage_token = quasar_group.leverage_tokens[leverage_token_index];
+
+            check_eq!(
+                leverage_token.mango_account,
+                *mango_account_ai.key,
+                QuasarErrorCode::InvalidAccount
+            );
+
+            native_price = leverage_token.get_native_price(
+                token_mint_ai,
+                &mango_group,
+                &mango_account,
+                &mango_cache,
+            )?;
+        }
+
         invoke_burn(
             token_program_ai,
             owner_leverage_token_account_ai,
@@ -365,7 +422,7 @@ impl Processor {
             token_program_ai,
             mango_open_orders_ais,
             &[&signer_seeds],
-            quantity * LAMPORTS_PER_SOL,
+            quantity * native_price.to_num::<u64>(),
             false,
         )?;
 
@@ -398,7 +455,6 @@ impl Processor {
             QuasarErrorCode::InvalidAccount
         );
 
-        // might cause an error if any market has a different quote token
         let mut price;
         let mut quantity;
         {
@@ -506,52 +562,33 @@ impl Processor {
             quantity.abs().to_num::<i64>()
         );
 
-        place_mango_perp_order(
-            mango_program_ai,
-            mango_group_ai,
-            mango_account_ai,
-            pda_ai,
-            mango_cache_ai,
-            mango_perp_market_ai,
-            mango_bids_ai,
-            mango_asks_ai,
-            mango_event_queue_ai,
-            mango_open_orders_ais,
-            &[&signer_seeds],
-            price.to_num::<i64>(),
-            quantity.abs().to_num::<i64>(),
-            0,
-            if quantity > ZERO_I80F48 {
-                Side::Bid
-            } else {
-                Side::Ask
-            },
-            OrderType::Limit,
-        )?;
+        if (quantity > ZERO_I80F48) {
+            place_mango_perp_order(
+                mango_program_ai,
+                mango_group_ai,
+                mango_account_ai,
+                pda_ai,
+                mango_cache_ai,
+                mango_perp_market_ai,
+                mango_bids_ai,
+                mango_asks_ai,
+                mango_event_queue_ai,
+                mango_open_orders_ais,
+                &[&signer_seeds],
+                price.to_num::<i64>(),
+                quantity.abs().to_num::<i64>(),
+                0,
+                if quantity > ZERO_I80F48 {
+                    Side::Bid
+                } else {
+                    Side::Ask
+                },
+                OrderType::Limit,
+            )?;
+        }
 
         Ok(())
     }
-}
-
-fn get_mango_spot_value(
-    mango_account: &MangoAccount,
-    bank_cache: &RootBankCache,
-    price: I80F48,
-    market_index: usize,
-) -> QuasarResult<I80F48> {
-    let base_net = if mango_account.deposits[market_index].is_positive() {
-        mango_account.deposits[market_index]
-            .checked_mul(bank_cache.deposit_index)
-            .unwrap()
-    } else if mango_account.borrows[market_index].is_positive() {
-        -mango_account.borrows[market_index]
-            .checked_mul(bank_cache.borrow_index)
-            .unwrap()
-    } else {
-        ZERO_I80F48
-    };
-
-    Ok(base_net * price)
 }
 
 fn create_account<'a>(

@@ -1,4 +1,5 @@
 use fixed::types::I80F48;
+use mango::state::{MangoAccount, MangoCache, MangoGroup, QUOTE_INDEX, ZERO_I80F48};
 use mango_common::Loadable;
 use mango_macro::{Loadable, Pod};
 use num_enum::{IntoPrimitive, TryFromPrimitive};
@@ -11,16 +12,21 @@ use solana_program::{
 };
 
 use arrayref::{array_mut_ref, array_ref, array_refs, mut_array_refs};
+use spl_token::state::Mint;
 
 use std::cell::{Ref, RefMut};
 
-use crate::error::{check_assert, QuasarError, QuasarErrorCode, QuasarResult, SourceFileId};
+use crate::{
+    error::{check_assert, QuasarError, QuasarErrorCode, QuasarResult, SourceFileId},
+    utils::get_mango_spot_value,
+};
 
 declare_check_assert_macros!(SourceFileId::State);
 
 pub const MAX_BASE_TOKENS: usize = 16;
 pub const MAX_LEVERAGE_TOKENS: usize = 32;
 pub const LEVERGAE_TOKEN_DECIMALS: u8 = 0;
+pub const INITIAL_LEVERAGE_TOKEN_PRICE: u64 = 1;
 
 #[repr(u8)]
 #[derive(IntoPrimitive, TryFromPrimitive)]
@@ -160,5 +166,51 @@ pub struct LeverageToken {
 impl LeverageToken {
     pub fn is_empty(&self) -> bool {
         self.mint == Pubkey::default()
+    }
+
+    pub fn get_native_price(
+        &self,
+        mint_ai: &AccountInfo,
+        mango_group: &MangoGroup,
+        mango_account: &MangoAccount,
+        mango_cache: &MangoCache,
+    ) -> Result<I80F48, QuasarError> {
+        let mint = Mint::unpack(&mint_ai.try_borrow_data()?)?;
+        let supply = mint.supply;
+
+        if supply == 0 {
+            let quote_decimals = mango_group.tokens[QUOTE_INDEX].decimals;
+            let quote_unit = 10u64.pow(quote_decimals.into());
+            return Ok(I80F48::from_num(INITIAL_LEVERAGE_TOKEN_PRICE * quote_unit));
+        }
+
+        let mut net_asset_value = ZERO_I80F48;
+
+        for i in 0..mango_group.num_oracles {
+            let spot_value = get_mango_spot_value(
+                &mango_account,
+                &mango_cache.root_bank_cache[i],
+                mango_cache.price_cache[i].price,
+                i,
+            )?;
+
+            let (perp_base_value, perp_quote_value) = mango_account.perp_accounts[i].get_val(
+                &mango_group.perp_markets[i],
+                &mango_cache.perp_market_cache[i],
+                mango_cache.price_cache[i].price,
+            )?;
+
+            net_asset_value = net_asset_value
+                .checked_add(
+                    spot_value
+                        .checked_add(perp_base_value.checked_add(perp_quote_value).unwrap())
+                        .unwrap(),
+                )
+                .unwrap();
+        }
+
+        Ok(net_asset_value
+            .checked_div(I80F48::from_num(supply))
+            .unwrap())
     }
 }
