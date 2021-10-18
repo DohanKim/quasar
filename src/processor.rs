@@ -556,13 +556,11 @@ impl Processor {
 
         let signer_seeds = gen_signer_seeds(&quasar_group.signer_nonce, quasar_group_ai.key);
 
-        msg!(
-            "price: {}, quantity: {}",
-            price.to_num::<i64>(),
-            quantity.abs().to_num::<i64>()
-        );
+        let price = price.to_num::<i64>();
+        let quantity = quantity.to_num::<i64>();
+        msg!("price: {}, quantity: {}", price, quantity.abs());
 
-        if quantity > ZERO_I80F48 {
+        if quantity.abs() > 0 {
             place_mango_perp_order(
                 mango_program_ai,
                 mango_group_ai,
@@ -575,8 +573,8 @@ impl Processor {
                 mango_event_queue_ai,
                 mango_open_orders_ais,
                 &[&signer_seeds],
-                price.to_num::<i64>(),
-                quantity.abs().to_num::<i64>(),
+                price,
+                quantity.abs(),
                 0,
                 if quantity > ZERO_I80F48 {
                     Side::Bid
