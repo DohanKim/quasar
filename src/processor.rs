@@ -562,7 +562,7 @@ impl Processor {
             quantity.abs().to_num::<i64>()
         );
 
-        if (quantity > ZERO_I80F48) {
+        if quantity > ZERO_I80F48 {
             place_mango_perp_order(
                 mango_program_ai,
                 mango_group_ai,
